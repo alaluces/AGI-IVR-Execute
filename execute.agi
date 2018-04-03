@@ -1,0 +1,160 @@
+#!/usr/bin/perl
+$|=1;
+
+#use strict;
+#use warnings;
+
+use Email::Sender::Simple qw(sendmail);
+use Email::Sender::Transport::SMTPS;
+use Email::Simple ();
+use Email::Simple::Creator ();
+use Asterisk::AGI;
+
+$AGI = new Asterisk::AGI;
+%input = $AGI->ReadParse();
+
+my $phoneid = $input{callerid};
+my $datestring = localtime();
+
+$AGI->verbose("### Welcome $phoneid ###", 3);
+
+$pin_code = $AGI->get_data('sda-enter-pin', 5000, 6);
+
+# PIN CODE VERIFICATION
+if ($pin_code == 'YOUR_SECRET_PIN_CODE') {    
+    main_menu();
+} else {
+    $AGI->exec('Playback', 'sda-incorrect-pin');    
+    $AGI->hangup();		
+}
+
+
+### FUNCTIONS ####
+
+# MAIN IVR
+sub main_menu() {
+
+    # Proposed press 1 for live, press 2 for ticker
+    # Not implemented but still usable in the future
+    #$choice = $AGI->get_data('sda-welcome-menu', 10000, 1);
+    my $choice = '1';
+
+    my $str_srv_report;
+    my $script_name;
+    my @ips;
+
+    if ($choice == '1') {    
+        @ips = ("IP_ADDRESS:SSH_PORT", "10.10.10.10:22", "192.168.1.100:22"); 
+        $script_name = 'NAME_OF_SCRIPT_TO_EXECUTE.sh';      
+        $str_srv_report = restart_script($script_name, @ips);
+    } 
+    if ($choice == '2') {        
+        @ips = ("IP_ADDRESS:SSH_PORT", "10.10.10.10:22", "192.168.1.100:22"); 
+        $script_name = 'NAME_OF_SCRIPT_TO_EXECUTE_2.sh';       
+        $str_srv_report = restart_script($script_name, @ips);
+    }
+
+    $AGI->verbose("### CHOICE: $choice, SCRIPT: $script_name", 3);
+
+    $AGI->exec('Playback', 'sda-sending-email-report');
+    email_report(create_html_body($str_srv_report));
+    $AGI->exec('Playback', 'sda-all-tasks-done');
+}
+
+sub restart_script() {
+
+    my $str_srv_report;
+    my $count_total = 0;
+    my $count_sucess = 0;
+    my $report_summary;
+    my $report_script_type;
+    my $status;
+
+    my $script_name = shift;
+    my @ips = @_;
+
+    foreach my $i (@ips) {
+        my $server_ip = ( split /[:]/, $i )[0];
+        my $server_port = ( split /[:]/, $i )[1];
+        $count_total++;
+        
+        $AGI->exec('Playback', 'sda-restarting-script');
+        my $last_ip_octet = ( split /[.]/, $server_ip )[-1];
+        $AGI->say_digits($last_ip_octet);
+        $AGI->exec('Playback', 'sda-wait-moment');
+        $AGI->verbose("### EXECUTING RESTART SCRIPT ON SERVER $server_ip ###", 3);
+        if (system("ssh noc\@$server_ip -p$server_port \"sudo -Hu root /opt/$script_name > /dev/null 2>\&1\" ") == 0) {
+            $AGI->exec('Playback', 'sda-restart-success');
+            $status = 'SUCCESS';
+            $count_success++;
+        } else {
+            $AGI->exec('Playback', 'sda-restart-failed');
+            $status = 'FAIL';            
+        }
+        $str_srv_report = $str_srv_report . "$server_ip: <b>$status</b> <br/>";
+    }
+
+    $report_script_type = 'Script: <b>' . $script_name . "</b><br/><br/>";
+    $report_summary = "<b>" . int($count_success) . "</b> out of <b>" . int($count_total) . "</b> server(s) restarted successfully<br/><br/>";
+
+    $AGI->verbose("### DONE EXECUTING RESTART SCRIPT ###", 3);
+    return $report_script_type . $report_summary . $str_srv_report;
+    
+}
+
+sub create_html_body {
+    my $str_srv_report = shift;
+
+    $AGI->verbose("### BUILDING HTML BODY ###", 3);
+
+    my $body = "";
+    $body = $body . "<b>RESTART SCRIPT REPORT:</b>";
+    $body = $body . "<br/><br/>";
+    $body = $body . "$str_srv_report";
+    $body = $body . "<br/>";
+    $body = $body . "Restart script was initiated by phone <b>$phoneid</b>";
+    $body = $body . "<br/>";
+    $body = $body . "Timestamp: $datestring";
+
+    return $body;
+}
+
+sub email_report {
+    my $html_body = shift;
+
+    $AGI->verbose("### SENDING EMAIL ###", 3);
+
+    my $smtpuser   = ''; 
+
+    # GMAIL settings, make sure to enable less secure apps
+    #my $smtpserver = 'smtp.gmail.com';
+    #my $smtpport = 587;
+    #my $smtppassword = '';
+
+    # Custom settings
+    my $smtpserver = '';    
+    my $smtpport = 25;
+    my $smtppassword = '';       
+
+    my $transport = Email::Sender::Transport::SMTPS->new({
+        host => $smtpserver,
+        ssl  => 'starttls',
+        port => $smtpport,
+        sasl_username => $smtpuser,
+        sasl_password => $smtppassword,
+        debug => 0,
+    });
+
+    my $email = Email::Simple->create(
+        header => [
+        To   => '',
+        From => '',
+        Subject => 'Restart script notification',
+        'Content-Type' => 'text/html', 
+        ],
+        body => "$html_body",
+    );    
+    
+    sendmail($email, { transport => $transport });
+
+}
